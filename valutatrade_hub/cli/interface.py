@@ -1,6 +1,13 @@
 import argparse
 import shlex
+from typing import Any
 
+from valutatrade_hub.core.currencies import CURRENCIES, get_currency
+from valutatrade_hub.core.exceptions import (
+    ApiRequestError,
+    CurrencyNotFoundError,
+    InsufficientFundsError,
+)
 from valutatrade_hub.core.usecases import WalletService
 
 
@@ -19,15 +26,31 @@ class WalletCLI:
             command.add_argument("--username", required=True)
             command.add_argument("--password", required=True)
 
-        portfolio = commands.add_parser("show-portfolio")
-        portfolio.add_argument("--base", default="USD")
+        currency_errors = (
+            "Ошибки: неизвестная валюта — проверьте поддерживаемые коды; "
+            "сбой получения курса — повторите позже или проверьте сеть."
+        )
+        portfolio = commands.add_parser("show-portfolio", epilog=currency_errors)
+        portfolio.add_argument(
+            "--base", default=self.service.settings.get("base_currency")
+        )
 
         for name in ("buy", "sell"):
-            command = commands.add_parser(name)
-            command.add_argument("--currency", required=True)
-            command.add_argument("--amount", type=float, required=True)
+            errors = currency_errors + " Сумма должна быть положительным числом."
+            if name == "sell":
+                errors += " Недостаточно средств — уменьшите сумму продажи."
+            command = commands.add_parser(name, epilog=errors)
+            command.add_argument(
+                "--currency", required=True, help="код валюты, например BTC"
+            )
+            command.add_argument(
+                "--amount",
+                type=float,
+                required=True,
+                help="количество валюты; должно быть больше нуля",
+            )
 
-        rate = commands.add_parser("get-rate")
+        rate = commands.add_parser("get-rate", epilog=currency_errors)
         rate.add_argument("--from", dest="from_currency", required=True)
         rate.add_argument("--to", dest="to_currency", required=True)
         commands.add_parser("help")
@@ -45,6 +68,15 @@ class WalletCLI:
                     break
             except SystemExit:
                 continue
+            except InsufficientFundsError as error:
+                print(error)
+            except CurrencyNotFoundError as error:
+                print(error)
+                print("Поддерживаемые валюты: " + ", ".join(CURRENCIES))
+                print("Справка по запросу курса: get-rate --help")
+            except ApiRequestError as error:
+                print(error)
+                print("Повторите попытку позже или проверьте подключение к сети.")
             except (ValueError, OSError) as error:
                 print(f"Ошибка: {error}")
             except (EOFError, KeyboardInterrupt):
@@ -83,9 +115,7 @@ class WalletCLI:
 
         elif args.command in ("buy", "sell"):
             if args.command == "buy":
-                result = self.service.buy(
-                    self.current_user, args.currency, args.amount
-                )
+                result = self.service.buy(self.current_user, args.currency, args.amount)
                 label = "Покупка выполнена"
                 value_label = "Оценочная стоимость покупки"
             else:
@@ -105,8 +135,7 @@ class WalletCLI:
                 f"(обновлено: {updated_at})"
             )
             print(
-                f"Обратный курс {args.to_currency}→{args.from_currency}: "
-                f"{1 / rate:.8f}"
+                f"Обратный курс {args.to_currency}→{args.from_currency}: {1 / rate:.8f}"
             )
 
         return True
@@ -123,16 +152,16 @@ class WalletCLI:
             )
         print(f"ИТОГО: {report['total']:,.2f} {base}")
 
-    def print_trade(self, result, label, value_label):
+    def print_trade(self, result: dict[str, Any], label: str, value_label: str) -> None:
         currency = result["currency"]
         print(
             f"{label}: {result['amount']:.4f} {currency} "
             f"по курсу {result['rate']:.2f} USD/{currency}"
         )
+        print(get_currency(currency).get_display_info())
         print("Изменения в портфеле:")
         print(
-            f"- {currency}: было {result['before']:.4f} "
-            f"→ стало {result['after']:.4f}"
+            f"- {currency}: было {result['before']:.4f} → стало {result['after']:.4f}"
         )
         print(f"{value_label}: {result['value']:,.2f} USD")
 

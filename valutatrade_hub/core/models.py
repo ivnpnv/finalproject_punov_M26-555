@@ -1,6 +1,7 @@
 import hashlib
 import math
 
+from valutatrade_hub.core.exceptions import InsufficientFundsError
 from valutatrade_hub.core.utils import RateService
 
 
@@ -88,7 +89,7 @@ class Wallet:
         if not math.isfinite(amount) or amount <= 0:
             raise ValueError("Сумма снятия должна быть конечным положительным числом.")
         if amount > self.balance:
-            raise ValueError("Недостаточно средств на балансе.")
+            raise InsufficientFundsError(self.balance, amount, self.currency_code)
 
         self.balance = self.balance - amount
 
