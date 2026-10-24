@@ -2,15 +2,17 @@ import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from valutatrade_hub.constants import ACTION_LOGGER_NAME, LOG_DATE_FORMAT
 from valutatrade_hub.infra.settings import SettingsLoader
 
 
 def setup_logging() -> logging.Logger:
+    """Настраивает один файловый обработчик с ротацией без дублирования записей."""
     settings = SettingsLoader()
     filepath = Path(settings.get("log_file")).resolve()
     filepath.parent.mkdir(parents=True, exist_ok=True)
 
-    logger = logging.getLogger("valutatrade.actions")
+    logger = logging.getLogger(ACTION_LOGGER_NAME)
     logger.setLevel(settings.get("log_level"))
     logger.propagate = False
 
@@ -30,6 +32,6 @@ def setup_logging() -> logging.Logger:
     handler.maxBytes = settings.get("log_max_bytes")
     handler.backupCount = settings.get("log_backup_count")
     handler.setFormatter(
-        logging.Formatter(settings.get("log_format"), datefmt="%Y-%m-%dT%H:%M:%S")
+        logging.Formatter(settings.get("log_format"), datefmt=LOG_DATE_FORMAT)
     )
     return logger

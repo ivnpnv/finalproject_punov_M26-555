@@ -2,12 +2,17 @@ import tomllib
 from pathlib import Path
 from typing import Any, Self
 
+from valutatrade_hub.constants import DEFAULT_SETTINGS
+
 
 class SettingsLoader:
+    """Один экземпляр конфигурации на процесс, с явной перезагрузкой."""
+
     _instance = None
 
     # __new__ проще метакласса: повторный вызов возвращает тот же объект.
     def __new__(cls) -> Self:
+        """Создаёт экземпляр при первом обращении и повторно возвращает его."""
         if cls._instance is None:
             instance = super().__new__(cls)
             instance._filepath = Path.cwd() / "pyproject.toml"
@@ -21,19 +26,7 @@ class SettingsLoader:
 
     def reload(self) -> None:
         """Заново читает настройки из секции tool.valutatrade."""
-        settings = {
-            "data_dir": "data",
-            "users_file": "users.json",
-            "portfolios_file": "portfolios.json",
-            "rates_file": "rates.json",
-            "rates_ttl_seconds": 300,
-            "base_currency": "USD",
-            "log_file": "logs/actions.log",
-            "log_format": "%(levelname)s %(asctime)s %(message)s",
-            "log_level": "INFO",
-            "log_max_bytes": 1_048_576,
-            "log_backup_count": 3,
-        }
+        settings = DEFAULT_SETTINGS.copy()
         if self._filepath.exists():
             with self._filepath.open("rb") as file:
                 config = tomllib.load(file)
