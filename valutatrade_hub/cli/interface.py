@@ -1,11 +1,16 @@
 import argparse
+import logging
 import shlex
+import sys
 from typing import Any
+
+from prettytable import PrettyTable
 
 from valutatrade_hub.constants import (
     AMOUNT_FORMAT,
     LOGIN_REQUIRED_MESSAGE,
     MONEY_FORMAT,
+    PARSER_LOGGER_NAME,
     PRICE_FORMAT,
     RATE_FORMAT,
     TRADE_BASE_CURRENCY,
@@ -15,12 +20,13 @@ from valutatrade_hub.core.exceptions import (
     ApiRequestError,
     CurrencyNotFoundError,
     InsufficientFundsError,
+    RatesUnavailableError,
 )
 from valutatrade_hub.core.usecases import WalletService
 
 
 class WalletCLI:
-    """Разбор команд и вывод сообщений; бизнес-логика остаётся в сервисе."""
+    """Командный интерфейс управления пользователями, портфелями и курсами."""
 
     def __init__(self, service: WalletService) -> None:
         self.service = service
@@ -64,6 +70,14 @@ class WalletCLI:
         rate = commands.add_parser("get-rate", epilog=currency_errors)
         rate.add_argument("--from", dest="from_currency", required=True)
         rate.add_argument("--to", dest="to_currency", required=True)
+        update = commands.add_parser("update-rates", help="обновить курсы через API")
+        update.add_argument("--source", choices=("coingecko", "exchangerate"))
+        show = commands.add_parser(
+            "show-rates", help="показать курсы из локального кэша"
+        )
+        show.add_argument("--currency", help="показать только указанную валюту")
+        show.add_argument("--top", type=int, help="N самых дорогих криптовалют")
+        show.add_argument("--base", default=TRADE_BASE_CURRENCY, help="базовая валюта")
         commands.add_parser("help")
         commands.add_parser("exit")
         return parser
@@ -86,6 +100,8 @@ class WalletCLI:
                 print(error)
                 print("Поддерживаемые валюты: " + ", ".join(CURRENCIES))
                 print("Справка по запросу курса: get-rate --help")
+            except RatesUnavailableError as error:
+                print(error)
             except ApiRequestError as error:
                 print(error)
                 print("Повторите попытку позже или проверьте подключение к сети.")
@@ -114,9 +130,60 @@ class WalletCLI:
             "buy": self._handle_trade,
             "sell": self._handle_trade,
             "get-rate": self._handle_rate,
+            "update-rates": self._handle_update_rates,
+            "show-rates": self._handle_show_rates,
         }
         handlers[args.command](args)
         return True
+
+    def _handle_update_rates(self, args: argparse.Namespace) -> None:
+        """Показывает ход обновления, количество изменений и частичные ошибки."""
+        logger = logging.getLogger(PARSER_LOGGER_NAME)
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+        logger.addHandler(handler)
+        log_path = self.service.settings.get("parser_log_file")
+        try:
+            result = self.service.update_rates(source=args.source)
+        except ApiRequestError as error:
+            print(f"Обновление не выполнено: {error}")
+            print(f"Подробности: {log_path}. Повторите попытку позже.")
+            return
+        finally:
+            logger.removeHandler(handler)
+            handler.close()
+        status = "с ошибками" if result["errors"] else "успешно"
+        print(
+            f"Обновление завершено {status}. Обновлено курсов: {result['updated']}. "
+            f"Получено: {result['received']}."
+        )
+        print(f"Последнее обновление: {result['snapshot']['last_refresh']}")
+        if result["errors"]:
+            print(f"Подробности ошибок: {log_path}")
+
+    def _handle_show_rates(self, args: argparse.Namespace) -> None:
+        """Выводит таблицу котировок с временем обновления и состоянием TTL."""
+        report = self.service.show_rates(args.currency, args.top, args.base)
+        print(f"Курсы из кэша (обновление: {report['last_refresh'] or 'не указано'}):")
+        table = PrettyTable(["Пара", "Курс", "Время котировки (UTC)", "Статус"])
+        table.align = "l"
+        for row in report["rows"]:
+            table.add_row(
+                [
+                    row["pair"],
+                    format(row["rate"], RATE_FORMAT),
+                    row["updated_at"],
+                    "актуален" if row["fresh"] else "устарел",
+                ]
+            )
+        if report["rows"]:
+            print(table)
+        else:
+            print("Нет курсов, соответствующих фильтрам.")
+        for warning in report["warnings"]:
+            print(warning)
+        if any(not row["fresh"] for row in report["rows"]):
+            print("Есть устаревшие котировки. Выполните update-rates.")
 
     def _handle_register(self, args: argparse.Namespace) -> None:
         """Регистрирует пользователя и предлагает войти без вывода пароля."""

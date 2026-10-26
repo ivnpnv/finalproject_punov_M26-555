@@ -1,79 +1,22 @@
-import json
 import math
-import os
-from collections.abc import Iterator
-from contextlib import contextmanager
-from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from tempfile import NamedTemporaryFile
-from threading import RLock
 from typing import Any
 
 from valutatrade_hub.constants import (
     INVALID_AMOUNT_MESSAGE,
-    JSON_INDENT,
     MIN_PASSWORD_LENGTH,
-    STATIC_USD_RATES,
     TRADE_BASE_CURRENCY,
 )
-from valutatrade_hub.core.currencies import CURRENCIES, get_currency
-from valutatrade_hub.core.exceptions import ApiRequestError
+from valutatrade_hub.core.currencies import (
+    CURRENCIES,
+    CryptoCurrency,
+    get_currency,
+    validate_code,
+)
+from valutatrade_hub.core.exceptions import RatesUnavailableError
+from valutatrade_hub.infra.database import DatabaseManager
 from valutatrade_hub.infra.settings import SettingsLoader
-
-_json_lock = RLock()
-
-
-def load_json(filepath: str | Path, default: Any) -> Any:
-    """Читает JSON; для отсутствующего файла возвращает независимый default."""
-    try:
-        with open(filepath, encoding="utf-8") as file:
-            return json.load(file)
-    except FileNotFoundError:
-        return deepcopy(default)
-    except json.JSONDecodeError:
-        raise ValueError(f"Не удалось прочитать JSON-файл: {filepath}.") from None
-
-
-def save_json(filepath: str | Path, data: Any) -> None:
-    """Атомарно заменяет JSON, сохраняя старый файл при ошибке записи."""
-    filepath = Path(filepath)
-    filepath.parent.mkdir(parents=True, exist_ok=True)
-    with _json_lock:
-        temporary_path = None
-        try:
-            with NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=filepath.parent,
-                suffix=".tmp",
-                delete=False,
-            ) as file:
-                temporary_path = Path(file.name)
-                json.dump(
-                    data,
-                    file,
-                    ensure_ascii=False,
-                    indent=JSON_INDENT,
-                    allow_nan=False,
-                )
-                file.flush()
-                os.fsync(file.fileno())
-            temporary_path.replace(filepath)
-        finally:
-            if temporary_path is not None:
-                temporary_path.unlink(missing_ok=True)
-
-
-@contextmanager
-def edit_json(filepath: str | Path, default: Any) -> Iterator[Any]:
-    """Сохраняет изменения после успешного блока, блокируя потоки процесса."""
-    with _json_lock:
-        data = load_json(filepath, default)
-        original = deepcopy(data)
-        yield data
-        if data != original:
-            save_json(filepath, data)
 
 
 def validate_currency(code: str) -> str:
@@ -96,7 +39,7 @@ def validate_password(password: str) -> str:
 
 
 class RateService:
-    """Хранит только курсы к USD; остальные пары вычисляет из них."""
+    """Читает кэш Parser Service без сетевых запросов и изменения файлов."""
 
     def __init__(
         self, data_dir: str | Path | None = None, ttl_seconds: float | None = None
@@ -115,81 +58,184 @@ class RateService:
             or self.ttl_seconds < 0
         ):
             raise ValueError("TTL курсов должен быть конечным неотрицательным числом.")
-        self.exchange_rates = STATIC_USD_RATES.copy()
+        self.database = DatabaseManager()
 
     def get_rate(self, from_currency: str, to_currency: str) -> dict[str, float | str]:
-        """Возвращает курс и время самой старой из использованных котировок."""
+        """Вычисляет курс через USD из одного снимка; проверяет обе котировки."""
         validate_currency(from_currency)
         validate_currency(to_currency)
         now = datetime.now(timezone.utc)
         if from_currency == to_currency:
             return {"rate": 1.0, "updated_at": now.isoformat()}
-
-        with edit_json(self.filepath, {}) as rates:
-            if not isinstance(rates, dict):
-                raise ValueError("Файл rates.json должен содержать словарь курсов.")
-            self._prune_cache(rates, now)
-            source = self._get_usd_rate(rates, from_currency, now)
-            target = self._get_usd_rate(rates, to_currency, now)
-            rate = source["rate"] / target["rate"]
-            if not math.isfinite(rate) or rate <= 0:
-                raise ApiRequestError("источник вернул некорректный курс")
-            updated_at = min(source["updated_at"], target["updated_at"])
-            return {"rate": rate, "updated_at": updated_at}
-
-    def _prune_cache(self, rates: dict, now: datetime) -> None:
-        """Удаляет устаревшие и производные пары; размер ограничен реестром."""
-        allowed = {f"{code}_{TRADE_BASE_CURRENCY}" for code in CURRENCIES}
-        metadata = {"source", "last_refresh"}
-        for key in list(rates):
-            if key not in metadata and (
-                key not in allowed or not self.is_fresh(rates[key], now)
-            ):
-                del rates[key]
+        snapshot = self.database.read(self.filepath, {"pairs": {}})
+        if not isinstance(snapshot, dict) or not isinstance(
+            snapshot.get("pairs"), dict
+        ):
+            raise RatesUnavailableError(
+                "Неверный формат кэша курсов. Выполните update-rates."
+            )
+        pairs = snapshot["pairs"]
+        source = self._get_usd_rate(pairs, from_currency, now)
+        target = self._get_usd_rate(pairs, to_currency, now)
+        rate = source["rate"] / target["rate"]
+        if not math.isfinite(rate) or rate <= 0:
+            raise RatesUnavailableError("Некорректный курс. Выполните update-rates.")
+        return {
+            "rate": rate,
+            "updated_at": min(source["updated_at"], target["updated_at"]),
+        }
 
     def _get_usd_rate(
-        self, rates: dict, code: str, now: datetime
+        self, pairs: dict[str, Any], code: str, now: datetime
     ) -> dict[str, float | str]:
-        """Берёт котировку к USD из кэша или обновляет через заглушку."""
+        """Возвращает свежий курс к USD или выбрасывает RatesUnavailableError."""
         if code == TRADE_BASE_CURRENCY:
             return {"rate": 1.0, "updated_at": now.isoformat()}
-        key = f"{code}_{TRADE_BASE_CURRENCY}"
-        cached = rates.get(key)
-        if self.is_fresh(cached, now):
-            timestamp = datetime.fromisoformat(cached["updated_at"])
-            if timestamp.tzinfo is None:
-                timestamp = timestamp.replace(tzinfo=timezone.utc)
-            return {
-                "rate": float(cached["rate"]),
-                "updated_at": timestamp.astimezone(timezone.utc).isoformat(),
-            }
-        rate = self.exchange_rates.get(code)
-        if type(rate) not in (int, float) or not math.isfinite(rate) or rate <= 0:
-            raise ApiRequestError(
-                f"не удалось получить курс {code}→{TRADE_BASE_CURRENCY}"
+        pair = f"{code}_{TRADE_BASE_CURRENCY}"
+        cached = pairs.get(pair)
+        if not self.is_fresh(cached, now):
+            reason = "отсутствует" if cached is None else "устарел или некорректен"
+            raise RatesUnavailableError(
+                f"Курс {pair} {reason}. Выполните update-rates."
             )
-        result = {"rate": float(rate), "updated_at": now.isoformat()}
-        rates[key] = result
-        rates["source"] = "StaticRates"
-        rates["last_refresh"] = result["updated_at"]
-        return result
+        timestamp = datetime.fromisoformat(cached["updated_at"])
+        return {
+            "rate": float(cached["rate"]),
+            "updated_at": timestamp.astimezone(timezone.utc).isoformat(),
+        }
+
+    def list_rates(
+        self,
+        currency: str | None = None,
+        top: int | None = None,
+        base: str = TRADE_BASE_CURRENCY,
+    ) -> dict[str, Any]:
+        """Возвращает курсы из одного снимка кэша с фильтрами и признаками свежести."""
+        if top is not None and (type(top) is not int or top <= 0):
+            raise ValueError("--top должен быть положительным целым числом.")
+        if currency is not None:
+            validate_code(currency)
+        validate_currency(base)
+        snapshot = self._read_rates_snapshot()
+        pairs = snapshot["pairs"]
+        now = datetime.now(timezone.utc)
+        codes = self._select_codes(pairs, currency, top, base)
+        target = self._cached_quote(pairs, base, now)
+        rows = []
+        warnings = []
+        for code in codes:
+            try:
+                source = self._cached_quote(pairs, code, now)
+                value = source["rate"] / target["rate"]
+                if not math.isfinite(value) or value <= 0:
+                    raise RatesUnavailableError(f"Некорректный курс {code}→{base}.")
+                rows.append(
+                    {
+                        "pair": f"{code}_{base}",
+                        "rate": value,
+                        "updated_at": min(source["updated_at"], target["updated_at"]),
+                        "fresh": self.is_fresh(source, now)
+                        and self.is_fresh(target, now),
+                    }
+                )
+            except RatesUnavailableError as error:
+                if currency is not None:
+                    raise
+                warnings.append(str(error))
+        rows.sort(key=lambda row: (-row["rate"], row["pair"]) if top else row["pair"])
+        if top is not None:
+            rows = rows[:top]
+        return {
+            "rows": rows,
+            "last_refresh": snapshot.get("last_refresh"),
+            "warnings": warnings,
+        }
+
+    def _read_rates_snapshot(self) -> dict[str, Any]:
+        """Проверяет структуру кэша и сообщает об отсутствии котировок."""
+        snapshot = self.database.read(self.filepath, {"pairs": {}})
+        if snapshot == {}:
+            snapshot = {"pairs": {}}
+        if not isinstance(snapshot, dict) or not isinstance(
+            snapshot.get("pairs"), dict
+        ):
+            raise RatesUnavailableError("Неверный формат кэша. Выполните update-rates.")
+        pairs = snapshot["pairs"]
+        if not pairs:
+            raise RatesUnavailableError(
+                "Локальный кеш курсов пуст. Выполните 'update-rates', "
+                "чтобы загрузить данные."
+            )
+        return snapshot
+
+    def _select_codes(
+        self,
+        pairs: dict[str, Any],
+        currency: str | None,
+        top: int | None,
+        base: str,
+    ) -> list[str]:
+        """Выбирает валюты для просмотра и ограничивает top криптовалютами."""
+        if currency is not None:
+            if currency not in CURRENCIES or (
+                currency != TRADE_BASE_CURRENCY
+                and f"{currency}_{TRADE_BASE_CURRENCY}" not in pairs
+            ):
+                raise RatesUnavailableError(f"Курс для '{currency}' не найден в кеше.")
+            codes = [currency]
+        else:
+            codes = sorted(
+                code
+                for code in CURRENCIES
+                if f"{code}_{TRADE_BASE_CURRENCY}" in pairs and code != base
+            )
+            if base != TRADE_BASE_CURRENCY:
+                codes.append(TRADE_BASE_CURRENCY)
+        if top is not None:
+            codes = [
+                code for code in codes if isinstance(CURRENCIES[code], CryptoCurrency)
+            ]
+        return codes
+
+    def _cached_quote(
+        self, pairs: dict[str, Any], code: str, now: datetime
+    ) -> dict[str, float | str]:
+        """Читает корректную котировку независимо от TTL для просмотра кэша."""
+        if code == TRADE_BASE_CURRENCY:
+            return {"rate": 1.0, "updated_at": now.isoformat()}
+        cached = pairs.get(f"{code}_{TRADE_BASE_CURRENCY}")
+        try:
+            rate = cached["rate"]
+            timestamp = datetime.fromisoformat(cached["updated_at"])
+            if (
+                type(rate) not in (int, float)
+                or not math.isfinite(rate)
+                or rate <= 0
+                or timestamp.tzinfo is None
+                or timestamp > now
+            ):
+                raise ValueError
+        except (KeyError, TypeError, ValueError):
+            raise RatesUnavailableError(
+                f"Курс для '{code}' отсутствует или некорректен. "
+                "Выполните update-rates."
+            ) from None
+        return {
+            "rate": float(rate),
+            "updated_at": timestamp.astimezone(timezone.utc).isoformat(),
+        }
 
     def is_fresh(self, cached: Any, now: datetime) -> bool:
-        """Проверяет значение и возраст котировки с учётом TTL."""
+        """Проверяет конечное значение, часовой пояс и возраст относительно TTL."""
         if not isinstance(cached, dict):
             return False
-
         rate = cached.get("rate")
         if type(rate) not in (int, float) or not math.isfinite(rate) or rate <= 0:
             return False
-
         try:
             updated_at = datetime.fromisoformat(cached["updated_at"])
         except (KeyError, TypeError, ValueError):
             return False
-
         if updated_at.tzinfo is None:
-            updated_at = updated_at.replace(tzinfo=timezone.utc)
-
-        age = (now - updated_at).total_seconds()
-        return 0 <= age < self.ttl_seconds
+            return False
+        return 0 <= (now - updated_at).total_seconds() < self.ttl_seconds

@@ -12,3 +12,7 @@ data/
 .ruff_cache/
 *.cast
 *.log
+
+.env
+.env.*
+*.json.lock

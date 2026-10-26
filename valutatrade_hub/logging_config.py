@@ -6,13 +6,15 @@ from valutatrade_hub.constants import ACTION_LOGGER_NAME, LOG_DATE_FORMAT
 from valutatrade_hub.infra.settings import SettingsLoader
 
 
-def setup_logging() -> logging.Logger:
+def setup_logging(
+    logger_name: str = ACTION_LOGGER_NAME, file_setting: str = "log_file"
+) -> logging.Logger:
     """Настраивает один файловый обработчик с ротацией без дублирования записей."""
     settings = SettingsLoader()
-    filepath = Path(settings.get("log_file")).resolve()
+    filepath = Path(settings.get(file_setting)).resolve()
     filepath.parent.mkdir(parents=True, exist_ok=True)
 
-    logger = logging.getLogger(ACTION_LOGGER_NAME)
+    logger = logging.getLogger(logger_name)
     logger.setLevel(settings.get("log_level"))
     logger.propagate = False
 

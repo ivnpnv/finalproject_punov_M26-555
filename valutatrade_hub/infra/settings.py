@@ -10,7 +10,6 @@ class SettingsLoader:
 
     _instance = None
 
-    # __new__ проще метакласса: повторный вызов возвращает тот же объект.
     def __new__(cls) -> Self:
         """Создаёт экземпляр при первом обращении и повторно возвращает его."""
         if cls._instance is None:

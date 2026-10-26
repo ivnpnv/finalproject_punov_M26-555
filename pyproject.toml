@@ -1,16 +1,21 @@
 [project]
 name = "valutatrade-hub"
 version = "0.1.0"
+description = "Console currency portfolio manager with exchange-rate collection"
+readme = "README.md"
 authors = [
     { name = "ivnpnv", email = "punov95@gmail.com" }
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "filelock>=4.2.4",
     "prettytable>=3.18.0",
+    "requests>=2.34.2",
 ]
 
 [project.scripts]
 valutatrade = "valutatrade_hub.cli.interface:main"
+valutatrade-parser = "valutatrade_hub.parser_service.scheduler:main"
 
 [build-system]
 requires = ["uv_build>=0.13.1,<0.14.0"]
@@ -33,9 +38,11 @@ data_dir = "data"
 users_file = "users.json"
 portfolios_file = "portfolios.json"
 rates_file = "rates.json"
+history_file = "exchange_rates.json"
 rates_ttl_seconds = 300
 base_currency = "USD"
 log_file = "logs/actions.log"
+parser_log_file = "logs/parser.log"
 log_format = "%(levelname)s %(asctime)s %(message)s"
 log_level = "INFO"
 log_max_bytes = 1048576

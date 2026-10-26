@@ -32,12 +32,12 @@ class User:
 
     @property
     def username(self) -> str:
-        """Возвращает или проверяет непустое имя пользователя."""
+        """Возвращает имя пользователя."""
         return self._username
 
     @username.setter
     def username(self, value: str) -> None:
-        """Возвращает или проверяет непустое имя пользователя."""
+        """Устанавливает непустое имя пользователя без пробелов по краям."""
         if not isinstance(value, str) or not value.strip():
             raise ValueError("Имя пользователя не может быть пустым.")
         self._username = value.strip()
@@ -87,17 +87,17 @@ class Wallet:
 
     @property
     def currency_code(self) -> str:
-        """Код кошелька нельзя изменить после создания."""
+        """Возвращает неизменяемый код валюты кошелька."""
         return self._currency_code
 
     @property
     def balance(self) -> float:
-        """Возвращает или проверяет конечный неотрицательный баланс."""
+        """Возвращает текущий баланс."""
         return self._balance
 
     @balance.setter
     def balance(self, value: float) -> None:
-        """Возвращает или проверяет конечный неотрицательный баланс."""
+        """Устанавливает конечный неотрицательный баланс."""
         if type(value) not in (int, float):
             raise ValueError("Баланс должен быть числом.")
         if not math.isfinite(value) or value < 0:

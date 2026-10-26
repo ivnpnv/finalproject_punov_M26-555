@@ -25,3 +25,7 @@ class ApiRequestError(Exception):
     def __init__(self, reason: str) -> None:
         self.reason = reason
         super().__init__(f"Ошибка при обращении к внешнему API: {reason}")
+
+
+class RatesUnavailableError(ValueError):
+    """В локальном кэше нет пригодной котировки; требуется update-rates."""

@@ -16,22 +16,23 @@ from valutatrade_hub.core.exceptions import InsufficientFundsError
 from valutatrade_hub.core.models import Portfolio, User, Wallet
 from valutatrade_hub.core.utils import (
     RateService,
-    edit_json,
-    load_json,
-    save_json,
     validate_amount,
     validate_currency,
     validate_password,
 )
 from valutatrade_hub.decorators import log_action
+from valutatrade_hub.infra.database import DatabaseManager
 from valutatrade_hub.infra.settings import SettingsLoader
 from valutatrade_hub.logging_config import setup_logging
+from valutatrade_hub.parser_service.config import ParserConfig
+from valutatrade_hub.parser_service.updater import create_updater
 
 
 class WalletService:
     """Регистрация, авторизация и операции с портфелями через JSON-хранилище."""
 
     def __init__(self, data_dir: str | Path | None = None) -> None:
+        self.database = DatabaseManager()
         self.settings = SettingsLoader()
         setup_logging()
         self.data_dir = Path(
@@ -41,6 +42,23 @@ class WalletService:
         self.portfolios_path = self.data_dir / self.settings.get("portfolios_file")
         self.rate_service = RateService(self.data_dir)
 
+    def update_rates(self, source: str | None = None) -> dict[str, Any]:
+        """Запускает Parser Service для каталога данных текущего приложения."""
+        config = ParserConfig(
+            rates_file_path=self.rate_service.filepath,
+            history_file_path=self.data_dir / self.settings.get("history_file"),
+        )
+        return create_updater(config, source=source).run_update()
+
+    def show_rates(
+        self,
+        currency: str | None = None,
+        top: int | None = None,
+        base: str = TRADE_BASE_CURRENCY,
+    ) -> dict[str, Any]:
+        """Возвращает отфильтрованный отчёт по локальным котировкам."""
+        return self.rate_service.list_rates(currency=currency, top=top, base=base)
+
     def register(self, username: str, password: str) -> User:
         """Создаёт уникального пользователя и пустой портфель."""
         if not isinstance(username, str) or not username.strip():
@@ -48,7 +66,7 @@ class WalletService:
         username = username.strip()
         validate_password(password)
 
-        users = load_json(self.users_path, [])
+        users = self.database.read(self.users_path, [])
         for record in users:
             if record["username"] == username:
                 raise ValueError(f"Имя пользователя '{username}' уже занято")
@@ -62,7 +80,7 @@ class WalletService:
             datetime.now(timezone.utc),
         )
         user.change_password(password)
-        portfolios = load_json(self.portfolios_path, [])
+        portfolios = self.database.read(self.portfolios_path, [])
         users.append(
             {
                 "user_id": user.user_id,
@@ -73,8 +91,8 @@ class WalletService:
             }
         )
         portfolios.append({"user_id": user.user_id, "wallets": {}})
-        save_json(self.users_path, users)
-        save_json(self.portfolios_path, portfolios)
+        self.database.write(self.users_path, users)
+        self.database.write(self.portfolios_path, portfolios)
         return user
 
     def login(self, username: str, password: str) -> User:
@@ -82,7 +100,7 @@ class WalletService:
         if not isinstance(username, str) or not username.strip():
             raise ValueError("Имя пользователя не может быть пустым.")
         username = username.strip()
-        users = load_json(self.users_path, [])
+        users = self.database.read(self.users_path, [])
         for record in users:
             if record["username"] == username:
                 user = User(
@@ -106,7 +124,7 @@ class WalletService:
             raise ValueError(LOGIN_REQUIRED_MESSAGE)
 
         if portfolios is None:
-            portfolios = load_json(self.portfolios_path, [])
+            portfolios = self.database.read(self.portfolios_path, [])
         for record in portfolios:
             if record["user_id"] == user.user_id:
                 wallets = {}
@@ -134,7 +152,7 @@ class WalletService:
     @contextmanager
     def _edit_portfolio(self, user: User | None) -> Iterator[Portfolio]:
         """Сохраняет портфель только после успешного завершения операции."""
-        with edit_json(self.portfolios_path, []) as portfolios:
+        with self.database.edit(self.portfolios_path, []) as portfolios:
             portfolio = self._load_portfolio(user, portfolios)
             yield portfolio
             self._save_portfolio(portfolio, portfolios)
